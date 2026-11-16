@@ -287,6 +287,13 @@ class ExtractedFact(BaseModel):
     fact_type: str = Field(description="Perspective classification: 'world' or 'experience'.")
     occurred_start: str | None = Field(default=None, description="ISO timestamp the fact's event started, if dated.")
     occurred_end: str | None = Field(default=None, description="ISO timestamp the fact's event ended, if dated.")
+    temporal_scope: str | None = Field(
+        default=None,
+        description=(
+            "Whether the fact is about the past ('historical'), the present ('current'), "
+            "or neither ('timeless')."
+        ),
+    )
     entities: list[str] = Field(
         default_factory=list, description="Raw (unresolved) entity names mentioned in the fact."
     )
@@ -488,6 +495,33 @@ class TemporalWindow(BaseModel):
         return self
 
 
+TEMPORAL_SCOPES = ("historical", "current", "timeless")
+
+
+def temporal_scope_from_metadata(metadata: dict[str, str] | None) -> str | None:
+    """The stored temporal scope of a memory unit, or None when absent/invalid.
+
+    The scope rides in the unit's metadata JSONB (no schema migration); rows
+    written before extraction recorded a scope carry no value and read as today.
+    """
+    if not isinstance(metadata, dict):
+        return None
+    scope = metadata.get("temporal_scope")
+    return scope if scope in TEMPORAL_SCOPES else None
+
+
+def format_when_with_scope(when: str | None, temporal_scope: str | None) -> str | None:
+    """The readback When line with its scope, e.g. ``2026-08-06 (historical)``.
+
+    A historical-scoped fact is never rendered as a bare date: the scope travels
+    next to When so a reader cannot mistake it for a current standing
+    instruction. Any other scope renders as the bare date.
+    """
+    if when is None:
+        return None
+    return f"{when} ({temporal_scope})" if temporal_scope == "historical" else when
+
+
 class MemoryFact(BaseModel):
     """
     A single memory fact returned by search or think operations.
@@ -524,6 +558,14 @@ class MemoryFact(BaseModel):
     occurred_start: str | None = Field(None, description="ISO format date when the event started occurring")
     occurred_end: str | None = Field(None, description="ISO format date when the event ended occurring")
     mentioned_at: str | None = Field(None, description="ISO format date when the fact was mentioned/learned")
+    temporal_scope: str | None = Field(
+        None,
+        description=(
+            "Whether the fact is about the past ('historical'), the present ('current'), "
+            "or neither ('timeless'). Absent for rows written before extraction recorded "
+            "a scope; such rows read as today."
+        ),
+    )
     document_id: str | None = Field(None, description="ID of the document this memory belongs to")
     metadata: dict[str, str] | None = Field(None, description="User-defined metadata")
 

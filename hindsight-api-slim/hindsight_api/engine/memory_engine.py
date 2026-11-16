@@ -790,6 +790,7 @@ from .response_models import (
     TokenUsage,
     ToolCallTrace,
     check_mental_model_id,
+    temporal_scope_from_metadata,
 )
 from .response_models import RecallResult as RecallResultModel
 from .retain import bank_utils, embedding_utils
@@ -11283,6 +11284,7 @@ class MemoryEngine(MemoryEngineInterface):
                                     mentioned_at=r.mentioned_at.isoformat() if r.mentioned_at else None,
                                     document_id=r.document_id,
                                     metadata=r.metadata,
+                                    temporal_scope=temporal_scope_from_metadata(r.metadata),
                                     chunk_id=str(r.chunk_id) if r.chunk_id else None,
                                     tags=r.tags or None,
                                 )
@@ -11395,6 +11397,7 @@ class MemoryEngine(MemoryEngineInterface):
                         mentioned_at=_iso_or_passthrough(r.mentioned_at),
                         document_id=r.document_id,
                         metadata=r.metadata,
+                        temporal_scope=temporal_scope_from_metadata(r.metadata),
                         chunk_id=r.chunk_id,
                         tags=r.tags,
                         source_fact_ids=source_fact_ids_by_obs.get(r.id) if request.include_source_facts else None,

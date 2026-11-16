@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, cast
 
 from ..prompt_utils import truncate_context_for_prompt
-from ..response_models import KnowledgeDocumentHit, MemoryFact
+from ..response_models import KnowledgeDocumentHit, MemoryFact, temporal_scope_from_metadata
 from ..schema import fq_table
 from ..search.tags import TagGroup, TagsMatch, tag_filter_active, tags_satisfy_groups
 from ..source_scope import ids_passing, visible_document_ids
@@ -620,6 +620,8 @@ def returned_memories(tool: str, output: dict[str, Any]) -> list[MemoryFact]:
             context=m.get("context"),
             occurred_start=m.get("occurred_start"),
             occurred_end=m.get("occurred_end"),
+            metadata=m.get("metadata"),
+            temporal_scope=temporal_scope_from_metadata(m.get("metadata")),
         )
         for m in raw
         if m.get("id")

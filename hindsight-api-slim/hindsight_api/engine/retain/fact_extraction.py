@@ -134,6 +134,22 @@ def _infer_temporal_date(fact_text: str, event_date: datetime | None) -> str | N
     return None
 
 
+def _metadata_with_temporal_scope(
+    metadata: dict[str, str] | None, temporal_scope: str | None
+) -> dict[str, str]:
+    """Caller metadata with the extraction's temporal scope merged in, when set.
+
+    The scope rides in the unit's metadata JSONB (no schema migration); readback
+    surfaces it from there. A caller-supplied ``temporal_scope`` wins on
+    collision — an explicit caller claim about the item's time is authoritative
+    over the extractor's judgement.
+    """
+    merged = dict(metadata or {})
+    if temporal_scope and "temporal_scope" not in merged:
+        merged["temporal_scope"] = temporal_scope
+    return merged
+
+
 def _sanitize_text(text: str | None) -> str | None:
     return sanitize_llm_output(text)
 
@@ -182,6 +198,10 @@ class Fact(BaseModel):
     # Optional temporal fields
     occurred_start: str | None = None
     occurred_end: str | None = None
+
+    # Temporal scope: whether the fact is about the past, the present, or neither.
+    # Set by the extraction LLM; absent reads as today, like every pre-existing row.
+    temporal_scope: Literal["historical", "current", "timeless"] | None = None
 
     # Optional location field
     where: str | None = Field(
@@ -284,6 +304,16 @@ class ExtractedFact(BaseModel):
     fact_kind: str = Field(default="conversation", description="'event' or 'conversation'")
     occurred_start: str | None = Field(default=None, description="ISO timestamp for events")
     occurred_end: str | None = Field(default=None, description="ISO timestamp for event end")
+    temporal_scope: Literal["historical", "current", "timeless"] | None = Field(
+        default=None,
+        description=(
+            "Whether the fact is about the past ('historical'), the present ('current'), "
+            "or neither ('timeless'). Set from the item timestamp and the content framing: "
+            "an item whose timestamp predates the retain, or whose content is framed as "
+            "history, is 'historical'; a preference or state that holds now is 'current'; "
+            "a fact with no time anchor is 'timeless'."
+        ),
+    )
     fact_type: Literal["world", "assistant"] = Field(
         description="'world' = objective/external facts, including user preferences, rules, corrections, and constraints even when stated during a conversation. 'assistant' = actions, experiences, or observations the assistant/agent actually performed."
     )
@@ -436,6 +466,16 @@ class ExtractedFactVerbose(BaseModel):
         default=None,
         description="WHEN the event ended (ISO timestamp). Only for events with duration. Leave null for conversations.",
     )
+    temporal_scope: Literal["historical", "current", "timeless"] | None = Field(
+        default=None,
+        description=(
+            "Whether the fact is about the past ('historical'), the present ('current'), "
+            "or neither ('timeless'). Set from the item timestamp and the content framing: "
+            "an item whose timestamp predates the retain, or whose content is framed as "
+            "history, is 'historical'; a preference or state that holds now is 'current'; "
+            "a fact with no time anchor is 'timeless'."
+        ),
+    )
 
     fact_type: Literal["world", "assistant"] = Field(
         description="'world' = objective/external facts about the user, other people, events, general knowledge, preferences, rules, corrections, or constraints. 'assistant' = actions, experiences, or observations the assistant/agent actually performed (e.g., 'I changed X', 'I discovered Y')."
@@ -494,6 +534,16 @@ class ExtractedFactNoCausal(BaseModel):
     )
     occurred_start: str | None = Field(default=None, description="WHEN the event happened (ISO timestamp).")
     occurred_end: str | None = Field(default=None, description="WHEN the event ended (ISO timestamp).")
+    temporal_scope: Literal["historical", "current", "timeless"] | None = Field(
+        default=None,
+        description=(
+            "Whether the fact is about the past ('historical'), the present ('current'), "
+            "or neither ('timeless'). Set from the item timestamp and the content framing: "
+            "an item whose timestamp predates the retain, or whose content is framed as "
+            "history, is 'historical'; a preference or state that holds now is 'current'; "
+            "a fact with no time anchor is 'timeless'."
+        ),
+    )
     fact_type: Literal["world", "assistant"] = Field(
         description="'world' = about the user/others, including user preferences, rules, corrections, and constraints. 'assistant' = actions or experiences the assistant/agent actually performed."
     )
@@ -543,6 +593,16 @@ class VerbatimExtractedFact(BaseModel):
     fact_kind: str = Field(default="conversation", description="'event' or 'conversation'")
     occurred_start: str | None = Field(default=None, description="ISO timestamp for events")
     occurred_end: str | None = Field(default=None, description="ISO timestamp for event end")
+    temporal_scope: Literal["historical", "current", "timeless"] | None = Field(
+        default=None,
+        description=(
+            "Whether the fact is about the past ('historical'), the present ('current'), "
+            "or neither ('timeless'). Set from the item timestamp and the content framing: "
+            "an item whose timestamp predates the retain, or whose content is framed as "
+            "history, is 'historical'; a preference or state that holds now is 'current'; "
+            "a fact with no time anchor is 'timeless'."
+        ),
+    )
     fact_type: Literal["world", "assistant"] = Field(
         description="'world' = objective/external facts. 'assistant' = first-person actions, experiences, or observations by the speaker."
     )
@@ -1129,6 +1189,12 @@ Use "Event Date" from input as reference for relative dates.
   "in 2015" → 2015-01-01 to 2015-12-31, "in March 2026" → 2026-03-01 to 2026-03-31.
   Never collapse to the period's first day or to the Event Date, current year included.
 - For conversation facts: NO occurred dates
+- Temporal scope: set temporal_scope for EVERY fact — "historical" (about the past:
+  the Event Date predates the retain, or the content is framed as history),
+  "current" (holds now), or "timeless" (no time anchor). A conversation fact with
+  temporal_scope="historical" MUST keep past-tense historical framing with its date
+  in the fact text (e.g. "In Aug 2026, Yasin asked for ..."), NOT rewritten as a
+  timeless present-tense preference.
 
 ══════════════════════════════════════════════════════════════════════════
 ENTITIES
@@ -1335,6 +1401,24 @@ For EVENTS (fact_kind="event") - MUST SET BOTH occurred_start AND occurred_end:
 For CONVERSATIONS (fact_kind="conversation"):
 - General info, preferences, ongoing states → NO occurred dates
 - Examples: "loves coffee", "works as engineer"
+
+══════════════════════════════════════════════════════════════════════════
+TEMPORAL SCOPE (WHETHER THE FACT IS ABOUT THE PAST, THE PRESENT, OR NEITHER)
+══════════════════════════════════════════════════════════════════════════
+
+Set temporal_scope for EVERY fact:
+- "historical" — the fact is about the past: the Event Date predates the retain,
+  or the content is framed as history ("back in August", "used to", "at the time").
+- "current" — the fact holds now: a preference, state, rule, or plan that is
+  in force at the Event Date.
+- "timeless" — the fact has no time anchor at all (a general truth, a definition).
+
+CRITICAL: a non-event fact (fact_kind="conversation") with temporal_scope="historical"
+MUST keep its historical framing in the fact text — past-tense framing with its date
+(e.g. "In Aug 2026, Yasin asked for ..."), NOT rewritten as a timeless present-tense
+preference ("prefers ..."). A historical preference restated in the present tense is
+a different claim: it tells the reader the preference holds now, which the source
+never said. When the scope is historical, the 'when' field carries the source date.
 
 ══════════════════════════════════════════════════════════════════════════
 FACT TYPE
@@ -2360,6 +2444,12 @@ async def _extract_facts_from_chunk(
                     elif fact_data.get("occurred_start"):
                         fact_data["occurred_end"] = fact_data["occurred_start"]
 
+                # Temporal scope: carried through when the extractor set a valid value.
+                # Absent or invalid reads as today, like every pre-existing row (additive).
+                scope = get_value("temporal_scope")
+                if scope in ("historical", "current", "timeless"):
+                    fact_data["temporal_scope"] = scope
+
                 # Entities are plain strings. Older prompts taught a {"text": ...}
                 # object form, so keep unwrapping it for models that still emit it.
                 validated_entities = _coerce_entity_strings(get_value("entities"))
@@ -3351,6 +3441,12 @@ async def extract_facts_from_contents_batch_api(
                 elif fact_data.get("occurred_start"):
                     fact_data["occurred_end"] = fact_data["occurred_start"]
 
+            # Temporal scope: carried through when the extractor set a valid value.
+            # Absent or invalid reads as today, like every pre-existing row (additive).
+            scope = get_value("temporal_scope")
+            if scope in ("historical", "current", "timeless"):
+                fact_data["temporal_scope"] = scope
+
             # Entities are plain strings. Older prompts taught a {"text": ...}
             # object form, so keep unwrapping it for models that still emit it.
             validated_entities = _coerce_entity_strings(get_value("entities"))
@@ -3499,7 +3595,7 @@ async def extract_facts_from_contents_batch_api(
                 attachment_ids=_attachment_ids_for(fact_from_llm, chunk_meta.chunk_text),
                 context=content.context,
                 mentioned_at=content.event_date,
-                metadata=content.metadata,
+                metadata=_metadata_with_temporal_scope(content.metadata, fact_from_llm.temporal_scope),
                 tags=content.tags,
                 observation_scopes=content.observation_scopes,
             )
@@ -3719,7 +3815,7 @@ async def extract_facts_from_contents(
                     context=content.context,
                     # mentioned_at: always the event_date (when the conversation/document occurred)
                     mentioned_at=content.event_date,
-                    metadata=content.metadata,
+                    metadata=_metadata_with_temporal_scope(content.metadata, fact_from_llm.temporal_scope),
                     tags=content.tags,
                     observation_scopes=content.observation_scopes,
                 )
